@@ -2559,10 +2559,8 @@ def admin_reply_keyboard(is_owner: bool = True) -> ReplyKeyboardMarkup:
     colored buttons in Telegram; see requirements.txt."""
     admin_mgr_label = "🛡 Admin Manager" if is_owner else "📋 Admin List"
     buttons = ["📤 Upload File", "📂 Manage Files", "💰 Wallet Manager", "🎟 Redeem Manager"]
-    if is_owner:
         buttons += ["📡 Force Channels"]
     buttons += ["📢 Broadcast", "👥 User Manager", "👤 All Users", "👑 Premium Manager", "📊 Statistics", "🛠 Maintenance"]
-    if is_owner:
         buttons += ["⚙ Settings"]
     buttons += [admin_mgr_label, "🖼 Buy Files Media"]
 
