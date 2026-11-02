@@ -6348,7 +6348,7 @@ async def cb_mf_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def cb_admin_fcmgr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await require_owner(update):
+    if not await require_admin(update):
         return
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Channel", callback_data="fc:add", style="primary"),
@@ -6364,7 +6364,7 @@ async def cb_admin_fcmgr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def cb_fc_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await require_owner(update):
+    if not await require_admin(update):
         return ConversationHandler.END
     query = update.callback_query
     await query.answer()
@@ -6479,7 +6479,7 @@ async def _save_force_channel(
 
 async def cb_fc_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not await require_owner(update):
+    if not await require_admin(update):
         return
     await query.answer()
     channels = await list_force_channels()
@@ -6496,7 +6496,7 @@ async def cb_fc_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cb_fc_remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, answered: bool = False) -> None:
     query = update.callback_query
     if not answered:
-        if not await require_owner(update):
+        if not await require_admin(update):
             return
         await query.answer()
     channels = await list_force_channels()
@@ -6510,7 +6510,7 @@ async def cb_fc_remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 async def cb_fc_remove_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not await require_owner(update):
+    if not await require_admin(update):
         return
     ch_id = int(query.data.split(":")[2])
     async with db_conn() as db:
