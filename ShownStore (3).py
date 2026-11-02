@@ -55,9 +55,9 @@ OWNER_ID =  8984851474 # Numeric Telegram user ID
 SQLITE_DB_PATH = "bot.db"  # Local SQLite file beside this script
 BOT_USERNAME = ""  # Optional; auto-detected on startup
 USER_LOG_CHANNEL_ID = 0  # 0 disables user activity logs
-RICH_MESSAGES_ENABLED = True
+RICH_MESSAGES_ENABLED = false
 CONCURRENT_UPDATES = 512
-HEALTH_CHECK_PORT = 10000  # Fixed port; configure your hosting service to use this port
+HEALTH_CHECK_PORT = int(os.environ.get("PORT", 10000))  # Fixed port; configure your hosting service to use this port
 BOT_VERSION = "v18.0-ui"
 _BOT_INSTANCE = None
 
