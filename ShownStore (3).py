@@ -49,7 +49,7 @@ from telegram.ext import (
 # EASY CONFIGURATION — edit these values directly, no .env needed
 # ============================================================
 APP_NAME = "ShownXStore Bot"
-BOT_TOKEN = '8290118111:AAH8JsJ9aT2VIUFQ-__x0MbZ9uZclMxpnEs'  # From @BotFather
+BOT_TOKEN = '8290118111:AAE1Zk0qdKe2naMgQYCE44NJMCJWEG_k4i0'  # From @BotFather
 OWNER_USERNAME = "@WhoisShown"  # Owner handle (for reference)
 OWNER_ID =  8984851474 # Numeric Telegram user ID
 SQLITE_DB_PATH = "bot.db"  # Local SQLite file beside this script
