@@ -4259,7 +4259,7 @@ async def log_admin_action(bot, actor_id: int, action_text: str) -> None:
 async def cb_payment_accept(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     admin = update.effective_user
-    if not await require_owner(update):
+    if not await require_admin(update):
         return
     payment_id = int(query.data.split(":")[2])
     # Atomic pending -> accepted. A double tap (or two admins) used to be able
