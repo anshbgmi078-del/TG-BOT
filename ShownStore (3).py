@@ -1,7 +1,7 @@
 # SHOWN X STORE BOT
-import os
-from __future__ import annotations
 
+from __future__ import annotations
+import os
 import asyncio
 import html
 import json
