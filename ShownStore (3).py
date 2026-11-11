@@ -1,4 +1,4 @@
-# SHOWN X STORE BOT
+ # SHOWN X STORE BOT
 
 from __future__ import annotations
 import os
@@ -15,6 +15,9 @@ import traceback
 from datetime import datetime, timedelta
 
 import sqlite3
+import csv
+import shutil
+import zipfile
 from pathlib import Path
 from telegram import (
     CopyTextButton,
@@ -1492,6 +1495,14 @@ class SQLiteDatabase:
     def __getitem__(self, name):
         return SQLiteCollection(self, name)
 
+    async def list_collection_names(self):
+        if self.connection is None:
+            raise RuntimeError("SQLite database is not open")
+        rows = self.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        return [row[0] for row in rows if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", row[0])]
+
     async def close(self):
         async with self.lock:
             if self.connection is not None:
@@ -2590,8 +2601,391 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🛡 Admin Manager", callback_data="ad:adminmgr", style="primary")],
         [InlineKeyboardButton("🖼 Buy Files Media", callback_data="ad:bfmedia", style="primary"),
          InlineKeyboardButton("🎞 Welcome Slides", callback_data="ad:wslides", style="primary")],
+        [InlineKeyboardButton("🗄 Database Manager", callback_data="ad:dbmanager", style="primary")],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+# ============================================================
+# DATABASE MANAGER — scheduled backups + portable import/export
+# ============================================================
+DB_BACKUP_DIR = Path(__file__).resolve().parent / "backups"
+DB_BACKUP_JOB_NAME = "database_auto_backup"
+DB_IMPORT_MAX_BYTES = 40 * 1024 * 1024
+DB_IMPORTABLE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".json", ".csv", ".sql", ".zip"}
+DB_BACKUP_INTERVAL_DEFAULT = 3600
+
+
+def _db_manager_keyboard(auto_enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Backup Now", callback_data="dbm:backup")],
+        [InlineKeyboardButton("⏱ Set Backup Interval", callback_data="dbm:interval"),
+         InlineKeyboardButton("🔔 Auto Backup: " + ("ON" if auto_enabled else "OFF"), callback_data="dbm:toggle")],
+        [InlineKeyboardButton("📤 Export SQLite", callback_data="dbm:export:sqlite"),
+         InlineKeyboardButton("📤 Export JSON", callback_data="dbm:export:json")],
+        [InlineKeyboardButton("📤 Export CSV", callback_data="dbm:export:csv"),
+         InlineKeyboardButton("📤 Export SQL", callback_data="dbm:export:sql")],
+        [InlineKeyboardButton("📥 Import Database", callback_data="dbm:import")],
+        [InlineKeyboardButton("⬅ Back", callback_data="ad:home")],
+    ])
+
+
+async def _db_manager_text() -> str:
+    enabled = (await get_setting("db_auto_backup", "0")) == "1"
+    interval = await get_setting_int("db_backup_interval", DB_BACKUP_INTERVAL_DEFAULT)
+    unit = await get_setting("db_backup_unit", "seconds")
+    last = await get_setting("db_backup_last", "Never")
+    seconds = interval * {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400}.get(unit, 1)
+    next_text = "Enabled" if enabled else "Disabled"
+    if enabled and last != "Never":
+        try:
+            next_text = (datetime.fromisoformat(last) + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except ValueError:
+            pass
+    return ("<b>🗄 Database Manager</b>\n\n"
+            f"<b>Automatic backup:</b> {'ON' if enabled else 'OFF'}\n"
+            f"<b>Interval:</b> {interval} {unit}\n"
+            f"<b>Last backup:</b> {html.escape(last)}\n"
+            f"<b>Next backup:</b> {html.escape(next_text)}\n\n"
+            "<i>Exports: native SQLite, JSON (MongoDB-compatible collection documents), CSV archive, and SQL dump.\n"
+            "Imports support SQLite, JSON, CSV and SQL dump files.</i>")
+
+
+async def _schedule_db_backup(app: Application) -> None:
+    jq = app.job_queue
+    if not jq:
+        log.warning("JobQueue unavailable; automatic database backups cannot be scheduled")
+        return
+    for job in jq.get_jobs_by_name(DB_BACKUP_JOB_NAME):
+        job.schedule_removal()
+    if (await get_setting("db_auto_backup", "0")) != "1":
+        return
+    value = await get_setting_int("db_backup_interval", DB_BACKUP_INTERVAL_DEFAULT)
+    unit = await get_setting("db_backup_unit", "seconds")
+    interval = value * {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400}.get(unit, 1)
+    jq.run_repeating(job_auto_database_backup, interval=max(10, interval), first=max(10, interval), name=DB_BACKUP_JOB_NAME)
+
+
+async def _create_database_backup() -> Path:
+    if _sqlite_db is None or _sqlite_db.connection is None:
+        raise RuntimeError("Database is not initialized")
+    DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    target = DB_BACKUP_DIR / f"shownxstore_backup_{stamp}.db"
+    async with _sqlite_db.lock:
+        destination = sqlite3.connect(str(target))
+        try:
+            _sqlite_db.connection.backup(destination)
+            destination.commit()
+        finally:
+            destination.close()
+    return target
+
+
+async def job_auto_database_backup(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        path = await _create_database_backup()
+        await set_setting("db_backup_last", datetime.utcnow().isoformat(timespec="seconds"))
+        log.info("Automatic database backup created: %s", path)
+        # Send the backup to the owner so it survives ephemeral hosting disks.
+        await context.bot.send_document(chat_id=OWNER_ID, document=path.open("rb"),
+                                        filename=path.name, caption="🗄 Automatic database backup")
+    except Exception:
+        log.exception("Automatic database backup failed")
+        try:
+            await context.bot.send_message(OWNER_ID, "⚠️ Automatic database backup failed. Check the bot logs.")
+        except Exception:
+            pass
+
+
+async def cb_db_manager(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await require_owner(update):
+        return
+    await q.answer()
+    await q.edit_message_text(await _db_manager_text(), parse_mode=ParseMode.HTML,
+                              reply_markup=_db_manager_keyboard((await get_setting("db_auto_backup", "0")) == "1"))
+
+
+async def cb_db_backup_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await require_owner(update): return
+    await q.answer("Creating backup…")
+    try:
+        path = await _create_database_backup()
+        await set_setting("db_backup_last", datetime.utcnow().isoformat(timespec="seconds"))
+        await q.message.reply_document(document=path.open("rb"), filename=path.name, caption="✅ Manual database backup")
+        await q.edit_message_text(await _db_manager_text(), parse_mode=ParseMode.HTML,
+                                  reply_markup=_db_manager_keyboard((await get_setting("db_auto_backup", "0")) == "1"))
+    except Exception as exc:
+        log.exception("Manual database backup failed")
+        await q.message.reply_text(f"❌ Backup failed: {html.escape(str(exc)[:300])}", parse_mode=ParseMode.HTML)
+
+
+async def cb_db_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await require_owner(update): return
+    enabled = (await get_setting("db_auto_backup", "0")) != "1"
+    await set_setting("db_auto_backup", "1" if enabled else "0")
+    await _schedule_db_backup(context.application)
+    await q.answer("Automatic backups enabled" if enabled else "Automatic backups disabled")
+    await q.edit_message_text(await _db_manager_text(), parse_mode=ParseMode.HTML,
+                              reply_markup=_db_manager_keyboard(enabled))
+
+
+async def cb_db_interval_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await require_owner(update): return
+    await q.answer()
+    context.user_data["db_wait_interval"] = True
+    await q.message.reply_text("Send the backup interval as a number and unit, e.g. 30 seconds, 5 minutes, 2 hours, or 1 day. Minimum interval is 10 seconds. Send /cancel to stop.")
+
+
+async def db_interval_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.user_data.get("db_wait_interval"):
+        return
+    if not await is_admin(update.effective_user.id) or update.effective_user.id != OWNER_ID:
+        return
+    raw = (update.message.text or "").strip().lower()
+    m = re.fullmatch(r"(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)", raw)
+    if not m:
+        await update.message.reply_text("Invalid format. Example: 30 seconds, 5 minutes, 2 hours, 1 day.")
+        return
+    amount = int(m.group(1)); token = m.group(2)
+    unit = "seconds" if token in {"s", "sec", "secs", "second", "seconds"} else "minutes" if token in {"m", "min", "mins", "minute", "minutes"} else "hours" if token in {"h", "hr", "hrs", "hour", "hours"} else "days"
+    seconds = amount * {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400}[unit]
+    if amount < 1 or seconds < 10 or seconds > 31536000:
+        await update.message.reply_text("Choose an interval from 10 seconds up to 365 days.")
+        return
+    context.user_data.pop("db_wait_interval", None)
+    await set_setting("db_backup_interval", str(amount)); await set_setting("db_backup_unit", unit)
+    await _schedule_db_backup(context.application)
+    await update.message.reply_text("✅ Backup interval updated.\n\n" + await _db_manager_text(), parse_mode=ParseMode.HTML,
+                                    reply_markup=_db_manager_keyboard((await get_setting("db_auto_backup", "0")) == "1"))
+
+
+async def _db_export_collections() -> dict[str, list[dict]]:
+    names = await _sqlite_db.list_collection_names()
+    result = {}
+    for name in names:
+        result[name] = await _sqlite_db[name].find({}).to_list(length=None)
+    return result
+
+
+async def cb_db_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await require_owner(update): return
+    await q.answer("Preparing export…")
+    kind = q.data.rsplit(":", 1)[-1]
+    DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    path = DB_BACKUP_DIR / f"shownxstore_export_{stamp}.{kind if kind != 'sqlite' else 'db'}"
+    try:
+        if kind == "sqlite":
+            path = await _create_database_backup()
+        elif kind == "json":
+            payload = {"format": "shownxstore-mongodb-compatible", "version": 1,
+                       "exported_at": datetime.utcnow().isoformat(), "collections": await _db_export_collections()}
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        elif kind == "sql":
+            async with _sqlite_db.lock:
+                path.write_text("\n".join(_sqlite_db.connection.iterdump()), encoding="utf-8")
+        elif kind == "csv":
+            payload = await _db_export_collections()
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, docs in payload.items():
+                    if not docs: continue
+                    import io
+                    stream = io.StringIO()
+                    fields = sorted({key for doc in docs for key in doc})
+                    writer = csv.DictWriter(stream, fieldnames=fields)
+                    writer.writeheader()
+                    for doc in docs: writer.writerow({k: json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (dict, list)) else v for k, v in doc.items()})
+                    archive.writestr(f"{name}.csv", stream.getvalue())
+            path = path.with_suffix(".zip")
+        else:
+            raise ValueError("Unsupported export format")
+        await q.message.reply_document(document=path.open("rb"), filename=path.name, caption=f"✅ Database export ({kind.upper()})")
+    except Exception as exc:
+        log.exception("Database export failed")
+        await q.message.reply_text(f"❌ Export failed: {html.escape(str(exc)[:300])}", parse_mode=ParseMode.HTML)
+
+
+def _parse_csv_value(value):
+    if value == "": return ""
+    try: return json.loads(value)
+    except (ValueError, TypeError): return value
+
+
+def _read_import_file(path: Path) -> dict[str, list[dict]]:
+    suffix = path.suffix.lower()
+    if suffix in {".db", ".sqlite", ".sqlite3"}:
+        source = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            tables = source.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+            data = {}
+            for (name,) in tables:
+                cols = [r[1] for r in source.execute(f'PRAGMA table_info("{name}")')]
+                if "document" not in cols: continue
+                docs = []
+                for (raw,) in source.execute(f'SELECT document FROM "{name}"'):
+                    doc = json.loads(raw)
+                    if isinstance(doc, dict): docs.append(doc)
+                data[name] = docs
+            if not data: raise ValueError("No compatible document collections found in SQLite file")
+            return data
+        finally: source.close()
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("collections"), dict):
+            data = payload["collections"]
+        elif isinstance(payload, dict) and isinstance(payload.get("documents"), list):
+            data = {str(payload.get("collection") or path.stem): payload["documents"]}
+        elif isinstance(payload, list):
+            data = {path.stem: payload}
+        elif isinstance(payload, dict):
+            data = {path.stem: [payload]}
+        else: raise ValueError("JSON must contain a collection map or a list of documents")
+        return {str(k): [dict(x) for x in v if isinstance(x, dict)] for k, v in data.items() if isinstance(v, list)}
+    if suffix == ".csv":
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            return {path.stem: [{k: _parse_csv_value(v) for k, v in row.items()} for row in csv.DictReader(f)]}
+    if suffix == ".zip":
+        data = {}
+        with zipfile.ZipFile(path, "r") as archive:
+            for member in archive.infolist():
+                if member.is_dir() or Path(member.filename).suffix.lower() != ".csv":
+                    continue
+                if Path(member.filename).name != member.filename:
+                    raise ValueError("Unsafe path in CSV archive")
+                import io
+                with archive.open(member) as raw:
+                    text_stream = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+                    data[Path(member.filename).stem] = [
+                        {k: _parse_csv_value(v) for k, v in row.items()}
+                        for row in csv.DictReader(text_stream)
+                    ]
+        if not data:
+            raise ValueError("ZIP archive contains no CSV collection exports")
+        return data
+    if suffix == ".sql":
+        temp = sqlite3.connect(":memory:")
+        try:
+            temp.executescript(path.read_text(encoding="utf-8"))
+            data = {}
+            for (name,) in temp.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+                cols = [r[1] for r in temp.execute(f'PRAGMA table_info("{name}")')]
+                if "document" not in cols: continue
+                docs = [json.loads(row[0]) for row in temp.execute(f'SELECT document FROM "{name}"')]
+                data[name] = [d for d in docs if isinstance(d, dict)]
+            if not data: raise ValueError("SQL dump does not contain compatible document collections")
+            return data
+        finally: temp.close()
+    raise ValueError("Supported imports: .db, .sqlite, .sqlite3, .json, .csv, .zip and .sql")
+
+
+async def cb_db_import_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await require_owner(update): return
+    await q.answer()
+    await q.edit_message_text("<b>📥 Import Database</b>\n\nChoose how imported records should be applied. A safety backup is created before import.",
+        parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Merge", callback_data="dbm:importmode:merge"),
+             InlineKeyboardButton("♻ Replace", callback_data="dbm:importmode:replace")],
+            [InlineKeyboardButton("⬅ Back", callback_data="ad:dbmanager")]]))
+
+
+async def cb_db_import_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await require_owner(update): return
+    mode = q.data.rsplit(":", 1)[-1]
+    context.user_data["db_import_mode"] = mode
+    context.user_data["db_wait_import_file"] = True
+    await q.answer()
+    await q.message.reply_text(f"Selected {mode.upper()}. Now upload one supported database file: .db, .sqlite, .sqlite3, .json, .csv, .zip or .sql (max 40 MB). Send /cancel to stop.")
+
+
+async def db_import_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.user_data.get("db_wait_import_file"):
+        return
+    if not update.effective_user or update.effective_user.id != OWNER_ID:
+        return
+    doc = update.message.document
+    suffix = Path(doc.file_name or "").suffix.lower()
+    if suffix not in DB_IMPORTABLE_SUFFIXES:
+        await update.message.reply_text("Unsupported file. Upload .db, .sqlite, .sqlite3, .json, .csv, .zip or .sql.")
+        return
+    if doc.file_size and doc.file_size > DB_IMPORT_MAX_BYTES:
+        await update.message.reply_text("File is larger than the 40 MB import limit.")
+        return
+    mode = context.user_data.get("db_import_mode", "merge")
+    temp_path = DB_BACKUP_DIR / f"incoming_{secrets.token_hex(6)}{suffix}"
+    DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    safety = None
+    try:
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(custom_path=str(temp_path))
+        collections = _read_import_file(temp_path)
+        if not collections:
+            raise ValueError("No importable documents found")
+        # Always take a consistent rollback copy before any destructive operation.
+        safety = await _create_database_backup()
+        if mode == "replace":
+            for name in await _sqlite_db.list_collection_names():
+                await _sqlite_db[name].delete_many({})
+        inserted = 0
+        identity_fields = {
+            "settings": ("key",), "users": ("user_id",), "admins": ("user_id",),
+            "wallet": ("user_id",), "premium": ("user_id",), "files": ("file_pk",),
+            "redeems": ("code",), "redeem_uses": ("code", "user_id"),
+            "purchases": ("user_id", "file_pk"), "referrals": ("new_user_id",),
+        }
+        for name, docs in collections.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"Invalid collection name: {name}")
+            for raw in docs:
+                item = dict(raw)
+                existing = None
+                if mode == "merge":
+                    if item.get("_id") is not None:
+                        existing = await _sqlite_db[name].find_one({"_id": item["_id"]})
+                    if existing is None:
+                        keys = identity_fields.get(name, ())
+                        identity = {key: item[key] for key in keys if key in item and item[key] is not None}
+                        if len(identity) == len(keys) and identity:
+                            existing = await _sqlite_db[name].find_one(identity)
+                if existing:
+                    await _sqlite_db[name].update_one({"_id": existing.get("_id")}, {"$set": item})
+                else:
+                    if mode == "merge" and item.get("_id") is not None and await _sqlite_db[name].find_one({"_id": item["_id"]}):
+                        item.pop("_id", None)
+                    await _sqlite_db[name].insert_one(item)
+                inserted += 1
+        # Repair stable file IDs after data restore.
+        await _repair_file_ids()
+        async with _settings_cache_lock: _settings_cache.clear()
+        await update.message.reply_text(f"✅ Import completed ({mode.upper()}).\nCollections: {len(collections)}\nRecords imported: {inserted}\nSafety backup: {safety.name}")
+    except Exception as exc:
+        log.exception("Database import failed")
+        if safety is not None:
+            try:
+                source = sqlite3.connect(str(safety))
+                try:
+                    async with _sqlite_db.lock:
+                        source.backup(_sqlite_db.connection)
+                finally:
+                    source.close()
+                async with _settings_cache_lock:
+                    _settings_cache.clear()
+                log.warning("Restored database from pre-import safety backup %s", safety)
+            except Exception:
+                log.exception("Automatic rollback from safety backup failed")
+        await update.message.reply_text(f"❌ Import failed: {str(exc)[:500]}\nA pre-import safety backup was created" + (" and rollback was attempted." if safety else "."))
+    finally:
+        context.user_data.pop("db_wait_import_file", None)
+        context.user_data.pop("db_import_mode", None)
+        try: temp_path.unlink(missing_ok=True)
+        except Exception: pass
 
 
 def back_button(cb: str = "ad:home") -> InlineKeyboardMarkup:
@@ -8249,6 +8643,15 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(cb_file_request_done, pattern=r"^freq:done:\d+$"))
 
     app.add_handler(CallbackQueryHandler(cb_admin_home, pattern="^ad:home$"))
+    app.add_handler(CallbackQueryHandler(cb_db_manager, pattern="^ad:dbmanager$"))
+    app.add_handler(CallbackQueryHandler(cb_db_backup_now, pattern="^dbm:backup$"))
+    app.add_handler(CallbackQueryHandler(cb_db_toggle, pattern="^dbm:toggle$"))
+    app.add_handler(CallbackQueryHandler(cb_db_interval_start, pattern="^dbm:interval$"))
+    app.add_handler(CallbackQueryHandler(cb_db_export, pattern=r"^dbm:export:(sqlite|json|csv|sql)$"))
+    app.add_handler(CallbackQueryHandler(cb_db_import_start, pattern="^dbm:import$"))
+    app.add_handler(CallbackQueryHandler(cb_db_import_mode, pattern=r"^dbm:importmode:(merge|replace)$"))
+    app.add_handler(MessageHandler(filters.Document.ALL, db_import_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, db_interval_message), group=1)
     app.add_handler(CallbackQueryHandler(cb_admin_managefiles, pattern="^ad:managefiles$"))
     app.add_handler(CallbackQueryHandler(cb_admin_walletmgr, pattern="^ad:walletmgr$"))
     app.add_handler(CallbackQueryHandler(cb_admin_redeemmgr, pattern="^ad:redeemmgr$"))
@@ -8572,6 +8975,7 @@ async def post_init(app: Application) -> None:
     if app.job_queue:
         app.job_queue.run_repeating(job_expire_premium, interval=3600, first=10)
         app.job_queue.run_repeating(job_expire_redeem_codes, interval=3600, first=15)
+        await _schedule_db_backup(app)
     log.info("Bot initialized and ready.")
 
 
