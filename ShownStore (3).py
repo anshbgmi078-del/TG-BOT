@@ -3638,7 +3638,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         + "\n\n"
         + f"<blockquote>{WELCOME_LINE}\n"
-        f"{WELCOME_LOVE} <b>Dᴇᴠʟᴏᴩᴇʀ :</b> @whoisshown {WELCOME_HEART}\n"
+        f"{WELCOME_LOVE} <b>Dᴇᴠʟᴏᴩᴇʀ :</b> @flertguy {WELCOME_HEART}\n"
         f"{WELCOME_LINE}</blockquote>"
     )
     kb = user_reply_keyboard(admin)
