@@ -6999,12 +6999,6 @@ async def conv_rm_coins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text("❌ Please enter a valid number.")
         return RM_COINS
     amount = int(text)
-    if update.effective_user.id != OWNER_ID:
-        if amount > ADMIN_MAX_REDEEM_COINS or amount < ADMIN_MIN_REDEEM_COINS:
-            await update.message.reply_text(
-                f"🚫 Admins can only create codes worth between {ADMIN_MIN_REDEEM_COINS}–{ADMIN_MAX_REDEEM_COINS} coins."
-            )
-            return RM_COINS
     context.user_data["rm_coins"] = amount
     await update.message.reply_text("⭐ Enter Premium Reward in days (0 for none):")
     return RM_PREMIUM
