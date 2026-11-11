@@ -52,9 +52,9 @@ from telegram.ext import (
 # EASY CONFIGURATION — edit these values directly, no .env needed
 # ============================================================
 APP_NAME = "ShownXStore Bot"
-BOT_TOKEN = '8290118111:AAE1Zk0qdKe2naMgQYCE44NJMCJWEG_k4i0'  # From @BotFather
-OWNER_USERNAME = "@WhoisShown"  # Owner handle (for reference)
-OWNER_ID =  8984851474 # Numeric Telegram user ID
+BOT_TOKEN = '9060308096:AAFxz2wrldVhUvNf0TRqnrxImRXsG-9HUuQ'  # From @BotFather
+OWNER_USERNAME = "@flertguy"  # Owner handle (for reference)
+OWNER_ID =  8695946179 # Numeric Telegram user ID
 SQLITE_DB_PATH = "bot.db"  # Local SQLite file beside this script
 BOT_USERNAME = ""  # Optional; auto-detected on startup
 USER_LOG_CHANNEL_ID = 0  # 0 disables user activity logs
