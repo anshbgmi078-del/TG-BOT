@@ -5644,9 +5644,14 @@ async def _deliver_file(bot, chat_id: int, f) -> None:
     try:
         await sender(chat_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
     except BadRequest:
-        if sender is bot.send_document:
-            raise
-        await bot.send_document(chat_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
+        try:
+            if sender is not bot.send_document:
+                await bot.send_document(chat_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
+            else:
+                raise
+        except TelegramError as e:
+            log.warning(f"File ID expired for file {f.get('file_name')}: {e}")
+            raise TelegramError("File is unavailable. Please re-upload.")
 
 
 async def _record_downloads(user_id: int, file_pks: list[int]) -> None:
