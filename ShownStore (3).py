@@ -3244,7 +3244,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         + "\n\n"
         + f"<blockquote>{WELCOME_LINE}\n"
-        f"{WELCOME_LOVE} <b>Dᴇᴠʟᴏᴩᴇʀ :</b> @flertguy {WELCOME_HEART}\n"
+        f"{WELCOME_LOVE} <b>Dᴇᴠʟᴏᴩᴇʀ :</b> @shownofficial {WELCOME_HEART}\n"
         f"{WELCOME_LINE}</blockquote>"
     )
     kb = user_reply_keyboard(admin)
@@ -3345,7 +3345,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard_user(update, context):
         return
-    support_username = (await get_setting("support_username", "flertguy")).lstrip("@")
+    support_username = (await get_setting("support_username", "shownofficial")).lstrip("@")
     text = ui_screen(
         "💬", "Support",
         ui_box(
@@ -3355,7 +3355,7 @@ async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         footer="We usually reply within a few hours.",
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 Message Support", url=f"https://t.me/flertguy", style="success")],
+        [InlineKeyboardButton("💬 Message Support", url=f"https://t.me/shownofficial", style="success")],
     ])
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
